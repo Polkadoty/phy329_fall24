@@ -1,134 +1,170 @@
 #!/usr/bin/python
 import numpy as np
-from scipy.integrate import solve_ivp
+import warnings
 
 
-def make_initial_conditions(n):
+class BaseRegressor:
     """
-    Make a bump-shaped initial conditions array
+    A base class for regression models.
     """
-    xx, yy = np.meshgrid(np.linspace(-1, 1, n), np.linspace(-1, 1, n))
-    rr =  (xx**2 + yy**2)**0.5
-    u_ic = 1 - 0.5 * np.copy(np.exp(-rr**2 - xx**2))
-    v_ic = 0.25 * np.copy(np.exp(-rr**2))
-    return u_ic, v_ic
+    def __init__(self):
+        self.weights = None
+        self.bias = None
 
-class GrayScott:
+    def fit(self, X, y):
+        """
+        Fits the model to the data.
+        """
+        raise NotImplementedError("Subclasses must implement this method")
+
+    def predict(self, X):
+        return X @ self.weights + self.bias
+
+    def score(self, X, y):
+        """
+        Returns the mean squared error of the model.
+        """
+        return np.mean((self.predict(X) - y)**2)
+
+
+
+
+class LinearRegressor(BaseRegressor):
     """
-    Simulate the two-dimensional Gray-Scott model
+    A linear regression model is a linear function of the form:
+    y = w0 + w1 * x1 + w2 * x2 + ... + wn * xn
+
+    The weights are the coefficients of the linear function.
+    The bias is the constant term w0 of the linear function.
+
+    Attributes:
+        method: str, optional. The method to use for fitting the model.
+        regularization: str, optional. The type of regularization to use.
     """
-    # def __init__(self, nx, ny, du=0.1, dv=0.05, b=0.0545, kappa=0.1, Lx=1.0, Ly=1.0):
-    def __init__(self, nx, ny, du=0.1, dv=0.05, b=0.0545, kappa=0.1165, Lx=1.0, Ly=1.0):
-        self.nx, self.ny = nx, ny
-        self.dx = Lx / nx
-        self.dy = Ly / ny
-        self.du, self.dv = du, dv
-        self.kappa = kappa
-        self.b = b
-        
-        kx = (np.pi / Lx) * np.hstack([np.arange(nx / 2 + 1), np.arange(1 - nx / 2, 0)])
-        ky = (np.pi / Ly) * np.hstack([np.arange(ny / 2 + 1), np.arange(1 - ny / 2, 0)])
-        self.kx, self.ky = kx, ky
-
-        kxx, kyy = np.meshgrid(kx, ky)
-        ksq = kxx**2 + kyy**2
-        self.ksq = ksq.flatten()
-
-        # These are some speed hacks. Instead of repeatedly flattening and then reshaping
-        # the arrays, we can just augment our parameter array. We gain speed at the 
-        # expense of memory.
-        self.d = np.hstack([self.du * np.ones(nx * ny), self.dv * np.ones(nx * ny)])
-        self.ksq_stack = np.hstack([self.ksq, self.ksq])
+    
+    def __init__(self, method="global", regularization="ridge", regstrength=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.method = method
+        self.regularization = regularization
+        self.regstrength = regstrength
         print(
             "Running with Instructor Solutions. If you meant to run your own code, do not import from solutions", 
             flush=True
         )
-        
-    def _reaction(self, y):
+
+    # functions that begin with underscores are private, by convention.
+    # Technically we could access them from outside the class, but we should
+    # not do that because they can be changed or removed at any time.
+    def _fit_global(self, X, y):
         """
-        Bistable reaction term: cast into real space, perform reaction, and then cast
-        back into Fourier space.
+        Fits the model using the global least squares method.
         """
-        ########
+        ############################################################
         #
-        # Your code here. I recommend performing the reaction in real space, and using
-        # the appropriate transformations to cast back and forth within the function.
         #
-        ########
-
-        # uvv = u*v*v
-        # u += Du*Lu - uvv + F*(1 - u)
-        # v += Dv*Lv + uvv - (F + k)*v
-
-        u = np.fft.ifft2(np.reshape(y[:self.nx * self.ny], (self.nx, self.ny)))
-        v = np.fft.ifft2(np.reshape(y[-self.nx * self.ny:], (self.nx, self.ny)))
-
-        # u = np.real(u)
-        # v = np.real(v)
-
-        uv2 = u * (v**2)
-        rxn_u = -uv2 + self.b * (1 - u)
-        rxn_v = uv2 - self.kappa * v
-
-        uk_out = np.fft.fft2(rxn_u)
-        vk_out = np.fft.fft2(rxn_v)
-        yk_out = np.hstack([uk_out.flatten(), vk_out.flatten()])
-        return yk_out
-
-
-    def _diffusion(self, y):
-        """
-        Perform diffusion in Fourier space
-        """
-        ########
+        # YOUR CODE HERE
         #
-        # Your code here. My solution is one line, but it depends on how you handle 
-        # the two different diffusion coefficients.
         #
-        ########
+        ############################################################
+        #raise NotImplementedError
+        if self.regularization is None:
+            self.weights = np.linalg.inv(X.T @ X) @ X.T @ y
+        elif self.regularization == "ridge":
+            self.weights = np.linalg.inv(X.T @ X + np.eye(X.shape[1]) * self.regstrength) @ X.T @ y
+        else:
+            warnings.warn("Unknown regularization method, defaulting to None")
+            self.weights = np.linalg.inv(X.T @ X) @ X.T @ y
+        self.bias = np.mean(y - X @ self.weights)
+        return self.weights, self.bias
 
-        return -self.d * self.ksq_stack * y
-       # return -self.d * self.ksq_stack  * y
-
-    def rhs(self, t, y):
+    def _fit_iterative(self, X, y, learning_rate=0.01):
         """
-        For technical reasons, this function needs to take a one-dimensional vector, 
-        and so we have to reshape the vector back into the mesh
+        Fit the model using gradient descent.
         """
-        # uv2 = u * (v**2)
-        # rhs_u = -uv2 + a * (1 - u)
-        # rhs_v = uv2 - b * v
-        # return rhs_u, rhs_v
-        #y = y.reshape((self.ny, self.nx))
+        ############################################################
+        #
+        #
+        # YOUR CODE HERE
+        #
+        #
+        ############################################################
+        #raise NotImplementedError
+        self.weights = np.zeros((X.shape[1], X.shape[1]))
+        self.bias = np.mean(y)
+        for i in range(X.shape[0]):
+            self.weights += learning_rate * (y[i] - X[i] @ self.weights - self.bias) * X[i] - self.regstrength * self.weights
+        self.weights /= X.shape[0]
+        return self.weights, self.bias
 
-        out = 10*self._reaction(y) + self._diffusion(y)
-
+    def fit(self, X, y):
+        """
+        Fits the model to the data. The method used is determined by the
+        `method` attribute.
+        """
+        ############################################################
+        #
+        #
+        # YOUR CODE HERE. If you implement the _fit_iterative method, be sure to include
+        # the logic to choose between the global and iterative methods.
+        #
+        #
+        ############################################################
+        #raise NotImplementedError
+        if self.method == "global":
+            out = self._fit_global(X, y)
+        elif self.method == "iterative":
+            out = self._fit_iterative(X, y)
+        else:
+            out = self._fit_global(X, y)
         return out
 
+def featurize_flowfield(field):
+    """
+    Compute features of a 2D spatial field. These features are chosen based on the 
+    intuition that the input field is a 2D spatial field with time translation 
+    invariance.
 
-    def solve(self, y0, t_min, t_max, nt, **kwargs):
-        """
-        Solve the heat equation using the odeint solver
+    The output is an augmented feature along the last axis of the input field.
 
-        **kwargs are passed to scipy.integrate.solve_ivp
-        """
-        u0, v0 = y0
-        tpts = np.linspace(t_min, t_max, nt)
-        u0k, v0k = np.fft.fft2(u0), np.fft.fft2(v0) # initial condition in Fourier space
-        y0k = np.hstack([u0k.flatten(), v0k.flatten()])
+    Args:
+        field (np.ndarray): A 3D array of shape (batch, nx, ny) containing the flow field
 
-        out = solve_ivp(self.rhs, (t_min, t_max), y0k, t_eval=tpts, **kwargs)
-        sol = out.y.T
+    Returns:
+        field_features (np.ndarray): A 3D array of shape (batch, nx, ny, M) containing 
+            the computed features stacked along the last axis
+    """
+    ############################################################################
+    #
+    #
+    # YOUR CODE HERE
+    # Hint: I used concatenate to combine the features together. You have some choice of
+    # which features to include, but make sure that your features are computed 
+    # separately for each batch element
+    # My implementation is vectorized along the first (batch) axis
+    #
+    ############################################################################
+    # raise NotImplementedError
 
-        # convert back to real space
-        sol2 = list()
-        for row in sol:
-            sol2.append([
-                np.fft.ifft2(np.reshape(row[:self.nx * self.ny], (self.nx, self.ny))),
-                np.fft.ifft2(np.reshape(row[-self.nx * self.ny:], (self.nx, self.ny)))
-            ])
-        sol2 = np.moveaxis(np.array(sol2), 1, 3)
+    ## Compute the Fourier features
+    field_fft = np.fft.fft2(field)
+    field_fft = np.fft.fftshift(field_fft)
+    field_fft_abs = np.log(np.abs(field_fft) + 1e-8)[..., None]
+    field_fft_phase = np.angle(field_fft)[..., None]
 
-        return tpts, sol2
+    ## Compute the spatial gradients along x and y
+    field_gradx = np.vstack([np.diff(field, axis=0), field[-1, None]])[..., None]
+    field_grady = np.hstack([np.diff(field, axis=1), field[:, None, -1]])[..., None]
+    # print(field_fft_abs.shape, field_gradx.shape, flush=True)
+    # field_grad = np.gradient(field, axis=(-2, -1))
+    # field_grad = np.stack(field_grad, axis=-1)
 
+    ## Compute the spatial Laplacian
+    # field_lap = np.stack(np.gradient(field_grad, axis=(-2, -1)), axis=-1)
+    # field_lap = np.sum(field_lap, axis=-1)
 
+    field = field[..., None]
+    field_features = np.concatenate(
+        [field_fft_phase, field_fft_abs, field_gradx, field_grady], 
+        axis=-1
+    )
+    return field_features
